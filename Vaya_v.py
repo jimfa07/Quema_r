@@ -137,6 +137,13 @@ if enviar:
     total = libras_restantes * precio_unitario
     enumeracion = df["Fecha"].nunique() + 1 if fecha not in df["Fecha"].dropna().values else df[df["Fecha"] == fecha]["Nº"].iloc[0]
 
+    depositos = st.session_state.df.copy()
+    monto_deposito = depositos[
+        (depositos["Fecha"] == fecha) & (depositos["Empresa"] == proveedor)
+    ]["Monto"].sum()
+    saldo_diario = monto_deposito - total
+    saldo_acumulado = df["Saldo Acumulado"].dropna().iloc[-1] + saldo_diario if df["Saldo Acumulado"].dropna().shape[0] > 0 else -35 + saldo_diario
+
     nueva_fila = {
         "Nº": enumeracion,
         "Fecha": fecha,
@@ -152,14 +159,14 @@ if enviar:
         "Kilos Restantes": kilos_restantes,
         "Libras Restantes": libras_restantes,
         "Total ($)": total,
-        "Monto Depósito": 0.0,
-        "Saldo diario": 0.0,
-        "Saldo Acumulado": 0.0
+        "Monto Depósito": monto_deposito,
+        "Saldo diario": saldo_diario,
+        "Saldo Acumulado": saldo_acumulado
     }
 
     st.session_state.data = pd.concat([df, pd.DataFrame([nueva_fila])], ignore_index=True)
-    st.session_state.data.to_pickle(DATA_FILE)
     st.success("Registro agregado correctamente")
+    st.session_state.data.to_pickle(DATA_FILE)
 
 # Registro de Nota de Débito
 st.subheader("Registro de Nota de Débito")
@@ -188,49 +195,35 @@ if agregar_nota:
     st.session_state.notas.to_pickle(DEBIT_NOTES_FILE)
     st.success("Nota de débito agregada correctamente")
 
-# Recalcular Monto Depósito, Saldo Diario y Saldo Acumulado
-if not st.session_state.data.empty:
-    df = st.session_state.data.copy()
-    depositos = st.session_state.df.copy()
-    notas = st.session_state.notas.copy()
-    df = df.sort_values("Fecha").reset_index(drop=True)
-    saldo_acumulado = -35
+# Actualizar saldo acumulado con descuento real
+for i, nota in st.session_state.notas.iterrows():
+    fecha = nota["Fecha"]
+    descuento_real = nota["Descuento real"]
+    indices = st.session_state.data[st.session_state.data["Fecha"] >= fecha].index
+    for j in indices:
+        if pd.notna(descuento_real):
+            st.session_state.data.at[j, "Saldo Acumulado"] += descuento_real
 
-    for i, row in df.iterrows():
-        fecha = row["Fecha"]
-        proveedor = row["Proveedor"]
-        total = row["Total ($)"] if pd.notna(row["Total ($)"]) else 0
-        monto_deposito = depositos[
-            (depositos["Fecha"] == fecha) & (depositos["Empresa"] == proveedor)
-        ]["Monto"].sum()
-        saldo_diario = monto_deposito - total
-        descuento_total = notas[notas["Fecha"] <= fecha]["Descuento real"].sum()
-        saldo_acumulado = saldo_acumulado + saldo_diario + descuento_total
-
-        st.session_state.data.at[i, "Monto Depósito"] = monto_deposito
-        st.session_state.data.at[i, "Saldo diario"] = saldo_diario
-        st.session_state.data.at[i, "Saldo Acumulado"] = saldo_acumulado - descuento_total
-
-# Mostrar tabla de registros
+# Mostrar tabla y permitir eliminar registros
 st.subheader("Tabla de Registros")
+st.session_state.data["Mostrar"] = st.session_state.data.apply(
+    lambda row: f"{row['Fecha']} - {row['Proveedor']} - ${row['Total ($)']:.2f}"
+    if pd.notna(row["Total ($)"]) else f"{row['Fecha']} - {row['Proveedor']} - Sin total",
+    axis=1
+)
+registro_a_eliminar = st.selectbox("Selecciona un registro para eliminar", st.session_state.data["Mostrar"])
+if st.button("Eliminar Registro Seleccionado"):
+    index_eliminar = st.session_state.data[st.session_state.data["Mostrar"] == registro_a_eliminar].index[0]
+    st.session_state.data.drop(index=index_eliminar, inplace=True)
+    st.session_state.data.reset_index(drop=True, inplace=True)
+    st.session_state.data.to_pickle(DATA_FILE)
+    st.success("Registro eliminado correctamente")
+
+# Mostrar dataframe
 df_display = st.session_state.data.copy()
 df_display["Saldo diario"] = df_display["Saldo diario"].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else "")
 df_display["Saldo Acumulado"] = df_display["Saldo Acumulado"].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else "")
-st.dataframe(df_display, use_container_width=True)
-
-# Eliminar fila de registro
-st.subheader("Eliminar un Registro de la Tabla Principal")
-if not st.session_state.data.empty:
-    st.session_state.data["Mostrar"] = st.session_state.data.apply(
-        lambda row: f"{row['Fecha']} - {row['Proveedor']} - ${row['Total ($)']:.2f}", axis=1
-    )
-    fila_a_eliminar = st.selectbox("Selecciona un registro para eliminar", st.session_state.data["Mostrar"])
-    if st.button("Eliminar Registro Seleccionado"):
-        index_eliminar = st.session_state.data[st.session_state.data["Mostrar"] == fila_a_eliminar].index[0]
-        st.session_state.data.drop(index=index_eliminar, inplace=True)
-        st.session_state.data.reset_index(drop=True, inplace=True)
-        st.session_state.data.to_pickle(DATA_FILE)
-        st.success("Registro eliminado correctamente.")
+st.dataframe(df_display.drop(columns=["Mostrar"], errors="ignore"), use_container_width=True)
 
 # Tabla de Notas de Débito
 st.subheader("Tabla de Notas de Débito")
@@ -264,7 +257,7 @@ def convertir_excel(df):
 
 st.download_button(
     label="Descargar Registros Excel",
-    data=convertir_excel(st.session_state.data),
+    data=convertir_excel(st.session_state.data.drop(columns=["Mostrar"], errors="ignore")),
     file_name="registro_proveedores_depositos.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
